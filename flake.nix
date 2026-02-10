@@ -13,7 +13,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
       in {
-        gen-wall = pkgs.stdenvNoCC.mkDerivation {
+        mmw = pkgs.stdenvNoCC.mkDerivation {
           pname = "mmw";
           version = "0.3.0";
 
@@ -34,9 +34,25 @@
             wlr-randr
           ];
         };
+        default = self.packages.${system}.mmw;
       }
     );
 
-    defaultPackage = self.packages.x86_64-linux.mmw;
+    devShells = nixpkgs.lib.genAttrs systems (system:
+      let
+        pkgs = nixpkgs.legacyPackages.${system};
+      in {
+        default = pkgs.mkShell {
+          buildInputs = with pkgs; [
+            scdoc
+            nushell
+            imagemagick
+            wlr-randr
+          ];
+        };
+      }
+    );
+
+
   };
 }
