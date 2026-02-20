@@ -32,9 +32,6 @@ Directory to save generated wallpapers
 *--preview*
 Generate a preview image showing crop regions
 
-*--apply*
-Apply wallpapers immediately using swaybg
-
 *--dry-run*
 Do not write files or apply wallpapers
 

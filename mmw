@@ -1,0 +1,603 @@
+#!/usr/bin/env -S nu --stdin
+
+# Core dependencies:
+# * magick (nixpkgs#imagemagick)
+# Optional dependencies:
+# * wlr-randr
+# * wayland-info (nixpkgs#wayland-utils)
+# * xrandr
+
+use std/log
+
+# nu-lint-ignore: missing_output_type
+def main [
+
+  image     : path   # Path to input image to cut
+  monitors? : string # Monitors to account for, auto-detected when left out, '-' to read for std in instead, see: man page
+
+  --json       (-j) # Output generate image path as JSON object { <montior> = <path> }
+  --json-input (-J) # Read monitor input as JSON, see: man page
+
+  --out        (-o): path                # Output directory for generate images, uses /tmp/xxx/ by default
+  --out-format (-f): string = "%o.%n.%e" # Output file name format, default: %o.%n.%e, see: man page
+
+  --ignore     (-i): string # Comma seperated list of monitors to ignore
+
+  --preview (-p)    # Generate preview image instead of corps
+
+  --exec (-e): string # Command to execute istead of outputing paths, see: man page
+  --orphan (-O)       # Orphin spawned exec processes (e.g don't wait to exit)
+
+  --vertical-alignment (-V): string = "center"    # How to align the verticall cuts
+  --horizontal-alignment (-H): string = "center"  # How to aling the horizontal cuts
+
+  --verbose # Show verbose output
+  --debug   # Show debug output
+  --dry-run # Don't generate any images (for testing)
+
+] {
+
+  # Set log level
+  $env.NU_LOG_LEVEL = if $verbose { "INFO" } else { "WARNING" }
+  if ($debug) {
+    $env.NU_LOG_LEVEL = "DEBUG"
+  }
+
+  # Expose to env
+  $env.DRY_RUN = $dry_run
+
+  # Load image info
+  let image = load-image $image
+  dlog image   $image
+
+  # Create output directory
+  # nu-lint-ignore: check_typed_flag_before_use
+  let out = create-output-directory $out
+
+  # Create get_path closure
+  let get_path = {|output_name|
+    pre-get-path $out_format $image.path $out $output_name
+  }
+
+  log info $"Out directory:'($out)'"
+
+  # Parse or detect outputs
+  let outputs = get-outputs $monitors $json_input
+
+  # Exclude outputs/monitors
+  let ignored = if $ignore != null { $ignore | split row , } else { [] }
+  let outputs = $outputs | where name not-in $ignored
+
+  # Caclulate stuff
+  let layout = calc-layout $outputs; 
+  let offset = calc-offset $image $layout $horizontal_alignment $vertical_alignment
+  dlog layout  $layout
+  dlog offset  $offset
+
+  # Calculate crops adding them to each output entry
+  let outputs = $outputs | calc-crops $layout $offset
+
+  dlog outputs $outputs
+
+  let result = if ($preview) {
+    log info "Generating preview"
+    generate-preview $image $outputs $get_path
+  } else {
+    log info "Generating crops"
+    generate-crops $image $outputs $get_path
+  }
+
+  dlog result $result
+
+  if ($exec != null) {
+    $result | exec $exec $orphan
+  } else {
+    $result | print-result $json
+  }
+}
+
+# ------------------------------------------------------------------------------
+# Reslut functions
+# ------------------------------------------------------------------------------
+def exec [
+  cmd: string
+  orphan: bool
+]: record -> nothing {
+  let cmds: list<string> = $in | items {|name,path|
+    try { $cmd | substitute {
+      o: $name
+      p: $path
+    }} catch {|err|
+      error make {
+        msg: "Faild to create command!"
+        inner: $err
+      }
+    }
+  }
+  for cmd in $cmds {
+    if $orphan {
+      log debug $"Spawning orphaned process: ($cmd)"
+      spawn nu -c $cmd
+    } else {
+      log debug $"Spawning process: ($cmd)"
+      # nu-lint-ignore: redundant_nu_subprocess
+      nu -c $cmd
+    }
+  }
+}
+
+def print-result [
+  json:bool
+]: record -> nothing {
+
+  if $json {
+    print ($in | to json)
+  }
+
+  let outpaths = $in | transpose name path | get path;
+  for p in $outpaths {
+    print $p
+  }
+}
+
+# ------------------------------------------------------------------------------
+# File/Filesystem helpers
+# ------------------------------------------------------------------------------
+
+def pre-get-path [
+  format: string
+  image: path
+  outpath: path
+  output: string
+]: nothing -> path {
+  let image_parts = $image | path parse
+  try { $outpath | path join ($format | substitute {
+      o : $output
+      n : $image_parts.stem
+      e : $image_parts.extension
+      N : ($image | parse basename)
+  })} catch {|err|
+    error make {
+      msg : "Faild to create output filename!"
+      inner: $err
+    }
+  }
+}
+
+def load-image [ image:path ]: nothing -> record<path:path, width:int, height:int> {
+
+  log info $"Loading image info for: '($image)'"
+  
+  if not ($image | path exists) {
+    error make { msg: $"Image not found: ($image)" }
+  }
+  # nu-lint-ignore: wrap_external_with_complete
+  let size = { ^magick identify -format "%w %h" $image } | catch-ext {|err|
+    error make {
+      msg: "Failed to get image size!"
+      inner: $err.error
+    }
+  } | split row " "
+    | into int
+
+  log info $"Image size: ($size.0?)x($size.1?)"
+
+  return {
+    width: $size.0?
+    height: $size.1?
+    path: $image
+  }
+}
+
+def create-output-directory [ out?:path ]: nothing -> path {
+  if $out == null {
+    return ({ ^mktemp -d } | catch-ext {|err|
+      error make {
+        msg: "Failed to create temporary directory!"
+        inner: $err.error
+      }
+    } | str trim)
+  }
+  try { mkdir $out } catch {|err|
+    error make {
+      msg: "Failed to create output directory"
+      inner: $err
+    }
+  }
+  return ($out | str trim)
+}
+
+# ------------------------------------------------------------------------------
+# Generate Functions
+# ------------------------------------------------------------------------------
+
+def generate-crops [
+  image   : record
+  outputs : table
+  get_path: closure
+]: nothing -> record {
+  let image_name = ($image.path | path basename)
+  let outputs = $outputs | update crop {|o|
+    $o.crop | merge {
+        path: (do $get_path $o.name )
+    }
+  }
+  if ($env.NU_LOG_LEVEL == DEBUG) { for o in $outputs {
+    dlog $"($o.name).crop" -d 2 $o.crop
+  }}
+
+  let instructions = $outputs | each {|it|
+    let geo = $"($it.crop.w)x($it.crop.h)+($it.crop.topLeft.x)+($it.crop.topLeft.y)"
+    [
+      "("
+      "-clone" "0"
+      "-crop" $geo
+      "+repage"
+      "-write" $it.crop.path
+      ")"
+    ]
+  } | flatten
+
+  if not ($env.DRY_RUN) {
+    # nu-lint-ignore: wrap_external_with_complete
+    { magick $image.path ...$instructions 'null:' } | catch-ext {|err|
+      error make {
+        msg: "Failed to generate preview image"
+        inner: $err.error
+      }
+    }
+  }
+  return ($outputs | reduce --fold {} {|it,acc|
+  $acc | merge {
+    $it.name : $it.crop.path
+  }})
+}
+
+def generate-preview [
+  image   : record
+  outputs : table
+  get_path: closure
+]: nothing -> record {
+
+  let outpath = do $get_path preview
+
+  let instructions = $outputs | each {|o|
+      let text = {
+        x: ($o.crop.center.x - $image.width  / 2)
+        y: ($o.crop.center.y - $image.height / 2)
+      }
+      let tl = $o.crop.topLeft
+      let br = $o.crop.bottomRight
+      [
+          "-stroke" "magenta"
+          "-fill" "none"
+          "-strokewidth" "10"
+          "-draw" $"rectangle ($tl.x),($tl.y) ($br.x),($br.y)"
+          "-stroke" "black"
+          "-strokewidth" "30"
+          "-draw" $"gravity Center text ($text.x),($text.y) '($o.name)'"
+          "-fill" "magenta"
+          "-stroke" "none"
+          "-draw" $"gravity Center text ($text.x),($text.y) '($o.name)'"
+      ]
+  } | flatten | prepend [
+    "-family" "Unifont"
+    "-pointsize" "100" 
+    "-strokewidth" "10"
+  ]
+
+  if not $env.DRY_RUN { 
+    # nu-lint-ignore: wrap_external_with_complete
+    { magick $image.path ...$instructions $outpath } | catch-ext {|err|
+      error make {
+        msg: "Faild to generate preview image"
+        inner: $err.error
+      }
+    }
+  }
+
+  log debug $"preview path:($outpath)"
+
+  return { preview : $outpath }
+}
+
+# ------------------------------------------------------------------------------
+# Calculation helpers
+# ------------------------------------------------------------------------------
+
+def calc-crops [
+  layout  : record
+  offset  : record
+]: table -> table {
+  each {|o|
+    let tl = {
+      x: ($o.x - $layout.min.x + $offset.x)
+      y: ($o.y - $layout.min.y + $offset.y)
+    }
+    $o | merge { crop: {
+      w: $o.w , h: $o.h
+      topLeft : $tl
+      bottomRight : { x: ($tl.x + $o.w    ), y: ($tl.y + $o.h    ) }
+      center      : { x: ($tl.x + $o.w / 2), y: ($tl.y + $o.h / 2) }
+    }}
+  }
+}
+
+def calc-offset [
+  image: record
+  layout: record
+  horizontal_alignment:string
+  vertical_alignment:string
+
+]: nothing -> record {
+  return {
+    x: (match $horizontal_alignment {
+      "left"   => 0
+      "center" => (($image.width - $layout.width) / 2 | into int)
+      "right"  => ($image.width - $layout.width)
+    })
+    y: (match $vertical_alignment {
+      "top"    => 0
+      "center" => (($image.height - $layout.height) / 2 | into int)
+      "bottom" => ($image.height - $layout.height)
+    })
+  }
+}
+
+def calc-layout [ outputs:table ]: nothing -> record {
+  let min = {
+    x: ($outputs.x | math min)
+    y: ($outputs.y | math min)
+  }
+  let max = {
+    x: ($outputs | each {|o| $o.x + $o.w } | math max)
+    y: ($outputs | each {|o| $o.y + $o.h } | math max)
+  }
+  return {
+    width:  ($max.x - $min.x)
+    height: ($max.y - $min.y)
+    min : $min
+    max : $max
+  }
+}
+
+# ------------------------------------------------------------------------------
+# Outputs (monitors) query/parse
+# ------------------------------------------------------------------------------
+
+ # nu-lint-ignore: add_type_hints_arguments
+ def get-outputs [ monitors?:any, json?:bool ]: nothing -> table {
+
+  # if no input where given so try to auto detection instead
+  if ($monitors == null) {
+    log info "No input given, try auto-detection"
+
+    let session_info = get-session-info
+    log info $"Session type: ($session_info.type)"
+    log info $"Session desktop: ($session_info.desktop)"
+    log info $"Session wlr support: ($session_info.wlr)"
+    return (match (get-session-info) {
+      { type: "wayland", wlr: true        } => (get-outputs-wlr-randr)
+      { type: "wayland", desktop: "GNOME" } => (get-outputs-xrandr)
+      { type: "x11"                       } => (get-outputs-xrandr)
+      $session => (error make {
+        msg: $"Auto monitor detection not avalible for desktop session"
+      })
+    })
+  }
+
+  log debug $"monitors = ($monitors)"
+  # if input was '-' read from stdin
+  let input = if ($monitors == '-') { $in } else { $monitors }
+
+  log debug $"input = ($input)"
+
+  # if input is said to be json try to parse it
+  if ($json) {
+    log debug "json-input flag detected, parsing json input"
+    return (try { $input | from json } catch {|err|
+      error make {
+        msg: "Failed to parse json input!"
+        inner: $err
+      }
+    })
+  }
+  log debug "parsing monitor input"
+  
+  # Handle standard input parsing
+  return (get-outputs-parse $input)
+}
+
+
+def get-session-info []: nothing -> record {
+  let type = match [($env.XDG_SESSION_TYPE? | default unknown) ($env.WAYLAND_DISPLAY?)] {
+    ["wayland" _   ] => "wayland",
+    [_         $val] if ($val | is-not-empty) => "wayland",
+    ["x11"     _   ] => "x11",
+    [_         _   ] if ($env.DISPLAY? | is-not-empty) => "x11",
+    ["tty"     _   ] => "tty",
+    _ => "unknown"
+  }
+  let desktop = ($env.XDG_SESSION_DESKTOP? | default unknown)
+  let wlr = if ($type == wayland) {
+    try { assert-dep wayland-info } catch {|err|
+      error make {
+        msg: "Wayland session detected, but unable for query info"
+        inner: $err
+      }
+    }
+    { ^wayland-info } | catch-ext {|err|
+      error make $err.error
+    }
+    | lines
+    | any {|line| $line =~ zwlr_output_manager } # TODO check if correct protocall name!
+  }
+  return {
+    type: $type
+    wlr: $wlr
+    desktop: $desktop
+  }
+}
+
+
+def get-outputs-parse [ input:string ]: nothing -> table {
+  let regex = '(?P<name>[^:]+):(?P<w>\d+)x(?P<h>\d+)\+(?P<x>\d+)\+(?P<y>\d+)'
+  ($input
+  | split row ,
+  | parse --regex $regex
+  | each {|row| {
+    name: $row.name
+    x: ($row.x | into int)
+    y: ($row.y | into int)
+    w: ($row.w | into int)
+    h: ($row.h | into int)
+  }})
+}
+
+def get-outputs-wlr-randr []: nothing -> table {
+
+  assert-dep wlr-randr
+  log info "Using wlr-randr for monitor query"
+
+  let state = { ^wlr-randr --json } | catch-ext {|err|
+    error make {
+      msg: "Failed to get wlr state!"
+      inner: $err.error
+    }
+  }
+  return ( $state
+    | where enabled
+    | update modes
+      { where current
+      | select width height
+      | first
+      }
+    | each {|row|
+      let swap = ($row.transform in [90 270 flipped-90 flipped-270])
+      let w = if ($swap) { $row.modes.height } else { $row.modes.width  }
+      let h = if ($swap) { $row.modes.width  } else { $row.modes.height }
+      $row | merge { w: $w, h: $h }
+    }
+    | flatten position
+    | select name x y w h
+  )
+}
+
+def get-outputs-xrandr []: nothing -> table {
+
+  assert-dep xrandr
+  log info "Using xrandr for monitor query"
+
+  let raw = { ^xrandr --query } | catch-ext {|err|
+    error make {
+      msg: "Failed to get x11 state!"
+      inner: $err.error
+    }
+  }
+
+  # Regex:
+  # - (?P<name>\S+): Capture monitor name
+  # - connected (?:primary )?: Match connection status and optional 'primary' tag
+  # - (?P<w>\d+)x(?P<h>\d+)\+(?P<x>\d+)\+(?P<y>\d+): Capture geometry and offsets
+  # - (?: (?P<rot>left|right|inverted))?: Optionally capture rotation
+  let regex = '(?P<name>\S+) connected (?:primary )?(?P<w>\d+)x(?P<h>\d+)\+(?P<x>\d+)\+(?P<y>\d+)(?: (?P<rot>left|right|inverted))?'
+  $raw 
+  | lines
+  | parse --regex $regex
+  | each {|row|
+    let swap = ($row.rot in [left right])
+    let w = if ($swap) { $row.h } else { $row.w }
+    let h = if ($swap) { $row.w } else { $row.h }
+    {
+      name: $row.name
+      w: ($w | into int)
+      h: ($h | into int)
+      x: ($row.x | into int)
+      y: ($row.y | into int)
+    }
+  }
+}
+
+# ------------------------------------------------------------------------------
+# General helpers
+# ------------------------------------------------------------------------------
+
+def substitute [
+  replacements: record
+]: string -> string {
+  let span = (metadata).span
+
+  let replacements = $replacements | merge { "%": "%" }
+  # $in | str replace --all --regex '%(\w)' {|char|
+    # $replacements | get --optional $char | default $in
+  # }
+  $in | str replace --all --regex '%(%|\w)' {|char|
+    # $replacements | get --optional $char | default ($in | default "")
+    if ($char in $replacements) {
+      # nu-lint-ignore: unsafe_dynamic_record_access
+      $replacements | get $char
+    } else {
+      error make {
+        msg: $'Unprovided subtitution %($char)'
+        labels: [{
+          text: "in this string"
+          span: $span
+        }]
+      }
+    }
+  }
+}
+
+
+def dlog [
+  title:string
+  # nu-lint-ignore: add_type_hints_arguments
+  value:any  
+  --depth (-d):int = 0 # depth to print
+]: nothing -> nothing {
+  log debug $"($title):\n($value | table --expand --expand-deep $depth)"
+}
+
+# nu-lint-ignore: missing_output_type,missing_in_type
+def dpp [ title?:string ]: any -> any {
+  # if ($title != null) { print $"vvvvvvvvvv ($title) vvvvvvvvvv" }
+  # print $in
+  # if ($title != null) { print $"^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^" }
+  dlog $title $in
+  return $in
+}
+
+# nu-lint-ignore: missing_output_type
+def assert-dep [ exec:string ] {
+  if (which $exec | is-empty) {
+    error make {
+      msg: $'Dependency: "($exec)" not found!'
+    }
+  }
+}
+def check-dependency [ exec:string ]: nothing -> bool {
+  which $exec | is-empty | do {
+    if (not $in) { log warning $'dependency: "($exec)" not found!' }
+    $in
+  }
+}
+
+# nu-lint-ignore: missing_output_type
+def catch-ext [catch: closure]: closure -> any {
+  let result = do $in | complete
+
+  if $result.exit_code == 0 { return $result.stdout }
+
+  do $catch {
+    msg: $result.stderr
+    code: $result.exit_code
+    error: {
+      msg: $result.stderr
+      lables: [{
+        text: $"This command failed with code:($result.exit_code)"
+        span: (metadata $in).span
+      }]
+    }
+  }
+}
+
