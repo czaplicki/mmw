@@ -1,0 +1,18 @@
+sequential = false
+pipeline_placement = "start"
+max_pipeline_length = 80
+skip_external_parse_errors = true
+explicit_optional_access = false
+
+[groups]
+
+[rules]
+max_function_body_length = "off"
+remove_hat_not_builtin = "off"
+unused_variable = "off"
+closure_pipe_body_spacing = "off"
+add_label_to_error = "off"
+string_may_be_bare = "off"
+record_brace_spacing = "off"
+max_positional_params = "off"
+block_brace_spacing = "off"
