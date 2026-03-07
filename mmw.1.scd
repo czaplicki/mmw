@@ -7,7 +7,7 @@ mmw - generate per-monitor wallpapers
 *mmw* _IMAGE_ [_MONITORS_] [options]
 
 # DESCRIPTION
-`mmw` creates individual wallpapers for each active monitor based on its geometry and position.
+mmw creates individual wallpapers for each active monitor based on its geometry and position.
 It can detect monitor layouts automatically on many Wayland compositors and X11.
 
 By default, images are written to a temporary directory and the resulting
@@ -17,10 +17,10 @@ The _MONITORS_ argument is optional and can be used to manually specify monitor 
 If set to '-', layouts are read from standard input. See the *MONITOR SYNTAX* section for details.
 
 # POSITIONAL ARGUMENTS
-*_IMAGE_*
+*IMAGE*
 : The image to use as a source for the wallpapers.
 
-*_MONITORS_*
+*MONITORS*
 : An optional string describing the monitor layout. If omitted, `mmw` attempts to autodetect the layout.
 If set to `-`, monitor descriptions are read from stdin.
 This can be either a custom format string or JSON if `--json-input` is used.
@@ -38,10 +38,10 @@ This can be either a custom format string or JSON if `--json-input` is used.
 *-f*, *--out-format*=_FMT_
 : Format for the names of generated images. (default: "%o.%n.%e").
 The following substitutions are available:
-  - *%o*: monitor name (or "preview")
-  - *%n*: original image name without extension
-  - *%e*: original image extension
-  - *%N*: original image name with extension
+	- *%o*: monitor name (or "preview")
+	- *%n*: original image name without extension
+	- *%e*: original image extension
+	- *%N*: original image name with extension
 
 *-i*, *--ignore*=_OUTPUT,OUTPUT_
 : Comma-separated list of monitors to ignore.
@@ -52,8 +52,8 @@ The following substitutions are available:
 *-e*, *--exec*=_CMD_
 : Execute a command for each generated image instead of printing its path.
 The following substitutions are available in the command string:
-  - *%p*: path to the generated image
-  - *%o*: the monitor name
+	- *%p*: path to the generated image
+	- *%o*: the monitor name
 
 *-O*, *--orphan*
 : When using *--exec*, spawn the command as an orphaned process and exit immediately without waiting for it to complete.
@@ -83,7 +83,7 @@ Example: `DP-1:1920x1080+0+0,HDMI-A-1:1920x1080+1920+0`
 ## JSON Format
 When using *--json-input*, provide a JSON array of objects, where each object represents a monitor.
 e.g.
-```json
+```
 [
   {
     "name": "DP-1",
@@ -104,19 +104,19 @@ e.g.
 
 # EXAMPLES
 Generate wallpapers for all detected monitors and print their paths:
-`$ mmw wallpaper.jpg`
+$ mmw wallpaper.jpg
 
 Generate a preview of the crop layout:
-`$ mmw wallpaper.jpg --preview`
+$ mmw wallpaper.jpg --preview
 
-Generate wallpapers and set them using `swaybg`:
-`$ mmw wallpaper.jpg --exec "swaybg --image %p --output %o"`
+Generate wallpapers and set them using swaybg:
+$ mmw wallpaper.jpg --exec "swaybg --image %p --output %o"
 
 Generate wallpapers in a specific directory with a custom name format:
-`$ mmw image.png --out ~/Pictures/wallpapers -f "%n-%o.%e"`
+$ mmw image.png --out ~/Pictures/wallpapers -f "%n-%o.%e"
 
 Pass monitor layout manually via stdin:
-`$ echo "VIRTUAL-1:3840x1080+0+0" | mmw wallpaper.jpg -`
+$ echo "VIRTUAL-1:3840x1080+0+0" | mmw wallpaper.jpg -
 
 Output paths as JSON for scripting:
 ```

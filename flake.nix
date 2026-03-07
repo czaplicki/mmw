@@ -22,7 +22,7 @@
 
           installPhase = ''
             mkdir -p $out/bin $out/share/man/man1
-            install -m755 mmw.nu $out/bin/mmw
+            install -m755 mmw $out/bin/mmw
             scdoc < mmw.1.scd > $out/share/man/man1/mmw.1
           '';
 
@@ -34,7 +34,7 @@
           ];
 
           meta = {
-            description = "Multi-Monitor Wallpapers script";
+            description = "Multi-Monitor Wallpapers";
             mainProgram = "mmw";
             platforms = [ system ];
           };
